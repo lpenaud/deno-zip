@@ -1,72 +1,53 @@
-
-interface ZipEntryHeader {
-  version: number;
-  flags: Uint8Array;
-  compression: number;
-  modeTime: Uint8Array;
-  modeDate: Uint8Array;
-  crc32: Uint8Array;
-  compressedSize: number;
-  size: number;
-  filenameLength: number;
-  extraFieldsLength: number;
-}
-
-interface ZipEntry {
-  header: ZipEntryHeader;
-  filename: string;
-  extraFields: Uint8Array;
-}
+import { concatBytes } from "./utils.ts";
+import { LocalFile, createLocalFile } from "./local-file.ts";
+import { CentralDirectory, createCentralDirectory } from "./central-directory.ts";
 
 /**
- * File header signature
+ * Header signature.
  */
-const SIGNATURE = Uint8Array.of(0x50, 0x4B, 0x03, 0x04);
+const SIGNATURE = Uint8Array.of(0x50, 0x4B);
 
-function concatBytes(a: number, b: number, i: number): number {
-  return a + (b << (i * 4));
-}
+/**
+ * Local file header signature
+ * SIGNATURE + Uint8Array.of(0x03, 0x04)
+ */
+const LOCAL_FILE = Uint8Array.of(0x50, 0x4B, 0x03, 0x04);
 
-function zipEntryHeader(buffer: Uint8Array): ZipEntryHeader {
-  return {
-    version: buffer.subarray(0x04, 0x06).reduce(concatBytes),
-    flags: buffer.slice(0x06, 0x08),
-    compression: buffer.subarray(0x08, 0x0A).reduce(concatBytes),
-    modeTime: buffer.slice(0x0A, 0x0C),
-    modeDate: buffer.slice(0x0C, 0x0E),
-    crc32: buffer.slice(0x0E, 0x12),
-    compressedSize: buffer.subarray(0x12, 0x16).reduce(concatBytes),
-    size: buffer.subarray(0x16, 0x1A).reduce(concatBytes),
-    filenameLength: buffer.subarray(0x1A, 0x1C).reduce(concatBytes),
-    extraFieldsLength: buffer.subarray(0x1C, 0x1E).reduce(concatBytes),
-  };
-}
+/**
+ * Central directory header signature
+ * SIGNATURE + Uint8Array.of(0x01, 0x02)
+ */
+const CENTRAL_DIRECTORY = Uint8Array.of(0x50, 0x4B, 0x01, 0x02);
 
-function zipEntry(header: ZipEntryHeader, buffer: Uint8Array): ZipEntry {
-  const decoder = new TextDecoder();
-  return {
-    header,
-    filename: decoder.decode(buffer.subarray(0, header.filenameLength)),
-    extraFields: buffer.slice(header.filenameLength),
-  };
-}
-
-async function* exploreZip(readable: ReadableStream<Uint8Array>): AsyncGenerator<ZipEntry> {
-  let fileIndex = 0;
+async function* exploreZip(
+  readable: ReadableStream<Uint8Array>,
+): AsyncGenerator<LocalFile | CentralDirectory> {
   let i = 0;
   for await (const buffer of readable) {
+    const signaturePredicate: (v: number, j: number) => boolean = (v, j) =>
+      v === buffer[i + j];
     while ((i = buffer.indexOf(SIGNATURE[0], i)) !== -1) {
-      if (SIGNATURE.every((v, j) => v === buffer[i + j])) {
-        const header = zipEntryHeader(buffer.subarray(i, i + 0x1E));
-        i += 0x1E;
-        yield zipEntry(header, buffer.subarray(i, i + header.filenameLength + header.extraFieldsLength));
-        i += header.filenameLength + header.extraFieldsLength;
+      if (LOCAL_FILE.every(signaturePredicate)) {
+        const { end, localFile } = createLocalFile(buffer, i);
+        yield localFile;
+        i = end;
+        continue;
+      }
+      if (CENTRAL_DIRECTORY.every(signaturePredicate)) {
+        const { end, centralDirectory } = createCentralDirectory(buffer, i);
+        yield centralDirectory;
+        i = end;
         continue;
       }
       i += SIGNATURE.length;
     }
-    fileIndex += buffer.length;
   }
+}
+
+function centralDirectoryPredicate(
+  f: LocalFile | CentralDirectory,
+): f is CentralDirectory {
+  return (f as CentralDirectory).header.offsetLocalHeader !== undefined;
 }
 
 async function main([infile]: string[]): Promise<number> {
@@ -75,13 +56,24 @@ async function main([infile]: string[]): Promise<number> {
     return 1;
   }
   const file = await Deno.open(infile);
-  const files = await Array.fromAsync(exploreZip(file.readable));
-  if (files.length !== 4) {
+  const entries = await Array.fromAsync(exploreZip(file.readable));
+  const directories = entries.filter(centralDirectoryPredicate);
+  if (directories.length !== 4) {
     console.error("Found less than 4 files");
-    console.log("Find:", files.length);
+    console.log("Find:", directories.length);
     return 2;
   }
-  console.log(files);
+  console.log(
+    entries.filter((f) => f.filename === "src/zip.ts").map((f) => ({
+      ...f,
+      size: f.header.size.reduce(concatBytes),
+      compressedSize: f.header.compressedSize.reduce(concatBytes),
+      crc: f.header.crc32.reduce(
+        (acc, v) => acc + v.toString(16).toUpperCase().padStart(2, "0"),
+        "",
+      ),
+    })),
+  );
   return 0;
 }
 
