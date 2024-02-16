@@ -1,6 +1,9 @@
 import { concatBytes } from "./utils.ts";
-import { LocalFile, createLocalFile } from "./local-file.ts";
-import { CentralDirectory, createCentralDirectory } from "./central-directory.ts";
+import { createLocalFile, LocalFile } from "./local-file.ts";
+import {
+  CentralDirectory,
+  createCentralDirectory,
+} from "./central-directory.ts";
 
 /**
  * Header signature.
@@ -50,6 +53,18 @@ function centralDirectoryPredicate(
   return (f as CentralDirectory).header.offsetLocalHeader !== undefined;
 }
 
+function mapEntry(f: LocalFile | CentralDirectory) {
+  return {
+    ...f,
+    size: f.header.size.reduce(concatBytes),
+    compressedSize: f.header.compressedSize.reduce(concatBytes),
+    crc: f.header.crc32.reduce(
+      (acc, v) => acc + v.toString(16).toUpperCase().padStart(2, "0"),
+      "",
+    ),
+  };
+}
+
 async function main([infile]: string[]): Promise<number> {
   if (infile === undefined) {
     console.error("Usage:", "zip", "INFILE");
@@ -63,17 +78,10 @@ async function main([infile]: string[]): Promise<number> {
     console.log("Find:", directories.length);
     return 2;
   }
-  console.log(
-    entries.filter((f) => f.filename === "src/zip.ts").map((f) => ({
-      ...f,
-      size: f.header.size.reduce(concatBytes),
-      compressedSize: f.header.compressedSize.reduce(concatBytes),
-      crc: f.header.crc32.reduce(
-        (acc, v) => acc + v.toString(16).toUpperCase().padStart(2, "0"),
-        "",
-      ),
-    })),
-  );
+  console.log(JSON.stringify(directories.map(mapEntry)));
+  // console.log(
+  //   entries.filter((f) => f.filename === "src/zip.ts").map((f) => ()),
+  // );
   return 0;
 }
 

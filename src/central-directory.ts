@@ -32,7 +32,7 @@ const HEADER_LENGTH = 0x2E;
 function createHeader(buffer: Uint8Array): CentralDirectoryHeader {
   return {
     offset: buffer.byteOffset,
-    version: buffer.subarray(0x04, 0x06),
+    version: buffer.slice(0x04, 0x06),
     versionNeeded: buffer.subarray(0x06, 0x08).reduce(concatBytes),
     flags: buffer.slice(0x08, 0x0A),
     compression: buffer.subarray(0x0A, 0x0C).reduce(concatBytes),
