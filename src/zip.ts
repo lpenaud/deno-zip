@@ -1,5 +1,5 @@
-import { concatBytes } from "./utils.ts";
-import { createLocalFile, LocalFile } from "./local-file.ts";
+import { startsWith } from "https://deno.land/std@0.216.0/bytes/starts_with.ts";
+import { createLocalFile, LocalFile, LocalFileZipEntry } from "./local-file.ts";
 import {
   CentralDirectory,
   createCentralDirectory,
@@ -24,32 +24,55 @@ const CENTRAL_DIRECTORY = Uint8Array.of(0x50, 0x4B, 0x01, 0x02);
 
 async function* exploreZip(
   readable: ReadableStream<Uint8Array>,
-): AsyncGenerator<LocalFile | CentralDirectory> {
+  bufferLength = 8096,
+): AsyncGenerator<LocalFileZipEntry | CentralDirectory> {
+  const reader = readable.getReader({ mode: "byob" });
+  let memoryBuffer = new ArrayBuffer(bufferLength);
   let i = 0;
-  for await (let buffer of readable) {
+  let it: ReadableStreamBYOBReadResult<Uint8Array>;
+  let buffer: Uint8Array;
+  while ((it = await reader.read(new Uint8Array(memoryBuffer))).value !== undefined) {
+    buffer = it.value;
     while ((i = buffer.indexOf(SIGNATURE[0])) !== -1) {
       buffer = buffer.subarray(i);
-      if (LOCAL_FILE.every((v, j) => v === buffer[j])) {
-        const { endBuffer, localFile } = createLocalFile(buffer.subarray(LOCAL_FILE.length));
-        yield localFile;
-        buffer = endBuffer;
+      if (startsWith(buffer, LOCAL_FILE)) {
+        const { endBuffer, localFile } = createLocalFile(buffer.subarray(LOCAL_FILE.byteLength));
+        const entry = new LocalFileZipEntry({
+          buffer,
+          info: localFile,
+          reader,
+        });
+        yield entry;
+        if (entry.byteLength < endBuffer.byteLength) {
+          buffer = endBuffer.subarray(localFile.header.compressedSize); 
+        }
+        if (!entry.consumed) {
+          for await (const it of entry) {
+            // Consume the stream.
+            buffer = it;
+          }
+        }
+        // if (endBuffer.length < localFile.header.compressedSize) {
+        //   entrysize = localFile.header.compressedSize - endBuffer.byteLength;
+        // }
         continue;
       }
-      if (CENTRAL_DIRECTORY.every((v, j) => v === buffer[j])) {
-        const { endBuffer, centralDirectory } = createCentralDirectory(buffer.subarray(CENTRAL_DIRECTORY.length));
-        yield centralDirectory;
-        buffer = endBuffer;
-        continue;
-      }
-      buffer = buffer.subarray(SIGNATURE.length);
+      // if (startsWith(buffer, CENTRAL_DIRECTORY)) {
+      //   const { endBuffer, centralDirectory } = createCentralDirectory(buffer.subarray(CENTRAL_DIRECTORY.length));
+      //   yield centralDirectory;
+      //   buffer = endBuffer;
+      //   continue;
+      // }
+      buffer = buffer.subarray(CENTRAL_DIRECTORY.length);
     }
+    memoryBuffer = buffer.buffer;
   }
 }
 
 function centralDirectoryPredicate(
-  f: LocalFile | CentralDirectory,
+  f: LocalFileZipEntry | CentralDirectory,
 ): f is CentralDirectory {
-  return (f as CentralDirectory).header.offsetLocalHeader !== undefined;
+  return !(f instanceof LocalFileZipEntry);
 }
 
 async function main([infile]: string[]): Promise<number> {
@@ -58,17 +81,19 @@ async function main([infile]: string[]): Promise<number> {
     return 1;
   }
   const file = await Deno.open(infile);
-  const entries = await Array.fromAsync(exploreZip(file.readable));
-  const directories = entries.filter(centralDirectoryPredicate);
-  if (directories.length !== 4) {
-    console.error("Found less than 4 files");
-    console.log("Find:", directories.length);
-    return 2;
+  // const entries = await Array.fromAsync(exploreZip(file.readable));
+  for await (const entry of exploreZip(file.readable, 16192)) {
+    // if (centralDirectoryPredicate(entry)) {
+    //   break;
+    // }
+    console.log(entry.filename);
   }
-  console.log(JSON.stringify(entries));
-  // console.log(
-  //   entries.filter((f) => f.filename === "src/zip.ts").map((f) => ()),
-  // );
+  // const directories = entries.filter(centralDirectoryPredicate);
+  // if (directories.length !== 4) {
+  //   console.error("Found less than 4 files");
+  //   console.log("Find:", directories.length);
+  //   return 2;
+  // }
   return 0;
 }
 

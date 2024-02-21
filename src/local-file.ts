@@ -1,5 +1,6 @@
 import { subarrays } from "./utils.ts";
 import { concatBytes } from "./utils.ts";
+import { Compression } from "./constants.ts";
 
 export interface LocalFileHeader {
   version: number;
@@ -19,8 +20,6 @@ export interface LocalFile {
   filename: string;
   extraFields: Uint8Array;
 }
-
-const HEADER_LENGTH = 0x1E;
 
 const HEADER = [
   // Signature
@@ -88,4 +87,89 @@ export function createLocalFile(buffer: Uint8Array) {
     localFile,
     endBuffer,
   };
+}
+
+export interface LocalFileZipEntryOptions {
+  info: LocalFile;
+  reader: ReadableStreamBYOBReader;
+  buffer: Uint8Array;
+}
+
+export class LocalFileZipEntry {
+  #info: LocalFile;
+
+  #reader: ReadableStreamBYOBReader;
+
+  #byteRead: number;
+
+  #buffer: ArrayBuffer;
+
+  #currentOffset: number;
+
+  #currentLength: number;
+
+  get filename(): string {
+    return this.#info.filename;
+  }
+
+  get byteLength(): number {
+    return this.#info.header.compressedSize;
+  }
+
+  get remaning(): number {
+    return this.byteLength - this.#byteRead;
+  }
+
+  get consumed(): boolean {
+    return this.remaning === 0;
+  }
+
+  constructor({ info, reader, buffer }: LocalFileZipEntryOptions) {
+    this.#info = info;
+    this.#reader = reader;
+    this.#buffer = buffer.buffer;
+    this.#currentOffset = buffer.byteOffset;
+    this.#currentLength = buffer.byteLength;
+    this.#byteRead = this.byteLength < (this.#currentLength - this.#currentOffset)
+      ? this.byteLength
+      : this.#currentLength - this.#currentOffset;
+  }
+
+  readable(): ReadableStream<Uint8Array> {
+    const stream = ReadableStream.from(this);
+    return this.#info.header.compression === Compression.DEFLATED
+      ? stream.pipeThrough(new DecompressionStream("deflate"))
+      : stream;
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> {
+    let buffer: Uint8Array | undefined;
+    if (this.byteLength < (this.#currentLength - this.#currentOffset)) {
+      yield new Uint8Array(this.#buffer, this.#currentOffset, this.byteLength);
+      return;
+    }
+    yield new Uint8Array(this.#buffer, this.#currentOffset);
+    while ((buffer = await this.#read()) !== undefined) {
+      yield buffer;
+    }
+  }
+
+  async #read(): Promise<Uint8Array | undefined> {
+    if (this.consumed) {
+      return undefined;
+    }
+    const length = this.remaning > this.#buffer.byteLength
+      ? this.#buffer.byteLength
+      : this.remaning;
+    const { value: buffer } = await this.#reader.read(
+      new Uint8Array(this.#buffer, 0, length),
+    );
+    if (buffer === undefined) {
+      return undefined;
+    }
+    // console.error(buffer.byteOffset, buffer.byteLength);
+    this.#byteRead += buffer.byteLength;
+    this.#buffer = buffer.buffer;
+    return buffer;
+  }
 }
