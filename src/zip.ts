@@ -26,23 +26,22 @@ async function* exploreZip(
   readable: ReadableStream<Uint8Array>,
 ): AsyncGenerator<LocalFile | CentralDirectory> {
   let i = 0;
-  for await (const buffer of readable) {
-    const signaturePredicate: (v: number, j: number) => boolean = (v, j) =>
-      v === buffer[i + j];
-    while ((i = buffer.indexOf(SIGNATURE[0], i)) !== -1) {
-      if (LOCAL_FILE.every(signaturePredicate)) {
-        const { end, localFile } = createLocalFile(buffer, i);
+  for await (let buffer of readable) {
+    while ((i = buffer.indexOf(SIGNATURE[0])) !== -1) {
+      buffer = buffer.subarray(i);
+      if (LOCAL_FILE.every((v, j) => v === buffer[j])) {
+        const { endBuffer, localFile } = createLocalFile(buffer.subarray(LOCAL_FILE.length));
         yield localFile;
-        i = end;
+        buffer = endBuffer;
         continue;
       }
-      if (CENTRAL_DIRECTORY.every(signaturePredicate)) {
-        const { end, centralDirectory } = createCentralDirectory(buffer, i);
+      if (CENTRAL_DIRECTORY.every((v, j) => v === buffer[j])) {
+        const { endBuffer, centralDirectory } = createCentralDirectory(buffer.subarray(CENTRAL_DIRECTORY.length));
         yield centralDirectory;
-        i = end;
+        buffer = endBuffer;
         continue;
       }
-      i += SIGNATURE.length;
+      buffer = buffer.subarray(SIGNATURE.length);
     }
   }
 }
@@ -51,18 +50,6 @@ function centralDirectoryPredicate(
   f: LocalFile | CentralDirectory,
 ): f is CentralDirectory {
   return (f as CentralDirectory).header.offsetLocalHeader !== undefined;
-}
-
-function mapEntry(f: LocalFile | CentralDirectory) {
-  return {
-    ...f,
-    size: f.header.size.reduce(concatBytes),
-    compressedSize: f.header.compressedSize.reduce(concatBytes),
-    crc: f.header.crc32.reduce(
-      (acc, v) => acc + v.toString(16).toUpperCase().padStart(2, "0"),
-      "",
-    ),
-  };
 }
 
 async function main([infile]: string[]): Promise<number> {
@@ -78,7 +65,7 @@ async function main([infile]: string[]): Promise<number> {
     console.log("Find:", directories.length);
     return 2;
   }
-  console.log(JSON.stringify(directories.map(mapEntry)));
+  console.log(JSON.stringify(entries));
   // console.log(
   //   entries.filter((f) => f.filename === "src/zip.ts").map((f) => ()),
   // );

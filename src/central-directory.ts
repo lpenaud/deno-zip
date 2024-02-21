@@ -1,7 +1,6 @@
-import { concatBytes } from "./utils.ts";
+import { concatBytes, subarrays } from "./utils.ts";
 
 export interface CentralDirectoryHeader {
-  offset: number;
   version: Uint8Array;
   versionNeeded: number;
   flags: Uint8Array;
@@ -9,8 +8,8 @@ export interface CentralDirectoryHeader {
   modeTime: Uint8Array;
   modeDate: Uint8Array;
   crc32: Uint8Array;
-  compressedSize: Uint8Array;
-  size: Uint8Array;
+  compressedSize: number;
+  size: number;
   filenameLength: number;
   extraFieldsLength: number;
   commentLength: number;
@@ -27,62 +26,93 @@ export interface CentralDirectory {
   comment: string;
 }
 
-const HEADER_LENGTH = 0x2E;
+const HEADER = [
+  // Signature
+  // 4,
+  // Version
+  2,
+  // Version needed
+  2,
+  // Flags
+  2,
+  // Compression
+  2,
+  // Mode time
+  2,
+  // Mode date
+  2,
+  // CRC-32
+  4,
+  // Compressed size
+  4,
+  // Uncompressed size
+  4,
+  // Filename length
+  2,
+  // Extra fields length
+  2,
+  // File comment length
+  2,
+  // Disk # start
+  2,
+  // Internal attributes
+  2,
+  // External attributes
+  4,
+  // Local header offset
+  4,
+];
 
-function createHeader(buffer: Uint8Array): CentralDirectoryHeader {
-  return {
-    offset: buffer.byteOffset,
-    version: buffer.slice(0x04, 0x06),
-    versionNeeded: buffer.subarray(0x06, 0x08).reduce(concatBytes),
-    flags: buffer.slice(0x08, 0x0A),
-    compression: buffer.subarray(0x0A, 0x0C).reduce(concatBytes),
-    modeTime: buffer.slice(0x0C, 0x0E),
-    modeDate: buffer.slice(0x0E, 0x10),
-    crc32: buffer.slice(0x10, 0x14).toReversed(),
-    compressedSize: buffer.slice(0x14, 0x18),
-    size: buffer.slice(0x18, 0x1C),
-    filenameLength: buffer.slice(0x1C, 0x1E).reduce(concatBytes),
-    extraFieldsLength: buffer.slice(0x1E, 0x20).reduce(concatBytes),
-    commentLength: buffer.slice(0x20, 0x22).reduce(concatBytes),
-    diskStart: buffer.slice(0x22, 0x24),
-    internalAttributes: buffer.slice(0x24, 0x26),
-    externalAttributes: buffer.slice(0x26, 0x2A),
-    offsetLocalHeader: buffer.subarray(0x2A, HEADER_LENGTH).reduce(concatBytes),
+function createHeader(buffer: Uint8Array) {
+  const it = subarrays(buffer, HEADER);
+  const header: CentralDirectoryHeader = {
+    version: it.next().value.slice(),
+    versionNeeded: it.next().value.reduce(concatBytes),
+    flags: it.next().value.slice(),
+    compression: it.next().value.reduce(concatBytes),
+    modeTime: it.next().value.slice(),
+    modeDate: it.next().value.slice(),
+    crc32: it.next().value.toReversed(),
+    compressedSize: it.next().value.reduce(concatBytes),
+    size: it.next().value.reduce(concatBytes),
+    filenameLength: it.next().value.reduce(concatBytes),
+    extraFieldsLength: it.next().value.reduce(concatBytes),
+    commentLength: it.next().value.reduce(concatBytes),
+    diskStart: it.next().value.slice(),
+    internalAttributes: it.next().value.slice(),
+    externalAttributes: it.next().value.slice(),
+    offsetLocalHeader: it.next().value.reduce(concatBytes),
   };
+  return { header, headerEndBuffer: it.next().value };
 }
 
 function fromHeader(
   header: CentralDirectoryHeader,
   buffer: Uint8Array,
-): CentralDirectory {
+) {
   const decoder = new TextDecoder();
-  return {
+  const it = subarrays(buffer, [
+    header.filenameLength,
+    header.extraFieldsLength,
+    header.commentLength,
+  ]);
+  const centralDirectory: CentralDirectory = {
     header,
-    filename: decoder.decode(buffer.subarray(0, header.filenameLength)),
-    extraFields: buffer.subarray(
-      header.filenameLength,
-      header.filenameLength + header.extraFieldsLength,
-    ),
-    comment: decoder.decode(
-      buffer.subarray(
-        header.filenameLength + header.extraFieldsLength,
-        header.filenameLength + header.extraFieldsLength + header.commentLength,
-      ),
-    ),
+    filename: decoder.decode(it.next().value),
+    extraFields: it.next().value.slice(),
+    comment: decoder.decode(it.next().value),
+  };
+  return {
+    centralDirectory,
+    endBuffer: it.next().value,
   };
 }
 
-export function createCentralDirectory(
-  buffer: Uint8Array,
-  start: number,
-): { end: number; centralDirectory: CentralDirectory } {
-  let end = start + HEADER_LENGTH;
-  const header = createHeader(buffer.subarray(start, end));
-  start = end;
-  end += header.filenameLength + header.extraFieldsLength +
-    header.commentLength;
+export function createCentralDirectory(buffer: Uint8Array) {
+  const { header, headerEndBuffer } = createHeader(buffer);
+  const { centralDirectory, endBuffer } = fromHeader(header, headerEndBuffer);
   return {
-    centralDirectory: fromHeader(header, buffer.subarray(start, end)),
-    end,
+    centralDirectory,
+    endBuffer,
   };
 }
