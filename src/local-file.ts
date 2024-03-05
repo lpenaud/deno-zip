@@ -1,13 +1,12 @@
 import { subarrays } from "./utils.ts";
-import { concatBytes } from "./utils.ts";
 import { Compression } from "./constants.ts";
 
 export interface LocalFileHeader {
   version: number;
-  flags: Uint8Array;
+  flags: number;
   compression: number;
-  modeTime: Uint8Array;
-  modeDate: Uint8Array;
+  modeTime: number;
+  modeDate: number;
   crc32: Uint8Array;
   compressedSize: number;
   size: number;
@@ -21,46 +20,27 @@ export interface LocalFile {
   extraFields: Uint8Array;
 }
 
-const HEADER = [
-  // Signature
-  // 4,
-  // Version
-  2,
-  // Flags
-  2,
-  // Compression
-  2,
-  // Mode time
-  2,
-  // Mode date
-  2,
-  // CRC-32
-  4,
-  // Compressed size
-  4,
-  // Uncompressed size
-  4,
-  // Filename length
-  2,
-  // Extra fields length
-  2,
-];
-
 function createHeader(buffer: Uint8Array) {
-  const it = subarrays(buffer, HEADER);
+  const view = new DataView(buffer.buffer, buffer.byteOffset);
   const header: LocalFileHeader = {
-    version: it.next().value.reduce(concatBytes),
-    flags: it.next().value.slice(),
-    compression: it.next().value.reduce(concatBytes),
-    modeTime: it.next().value.slice(),
-    modeDate: it.next().value.slice(),
-    crc32: it.next().value.toReversed(),
-    compressedSize: it.next().value.reduce(concatBytes),
-    size: it.next().value.reduce(concatBytes),
-    filenameLength: it.next().value.reduce(concatBytes),
-    extraFieldsLength: it.next().value.reduce(concatBytes),
+    version: view.getUint16(0, true),
+    flags: view.getUint16(2, true),
+    compression: view.getUint16(4, true),
+    modeTime: view.getUint16(6, true),
+    modeDate: view.getUint16(8, true),
+    // Big endian
+    crc32: Uint8Array.of(
+      view.getUint8(13),
+      view.getUint8(12),
+      view.getUint8(11),
+      view.getUint8(10),
+    ),
+    compressedSize: view.getUint32(14, true),
+    size: view.getUint32(18, true),
+    filenameLength: view.getUint16(22, true),
+    extraFieldsLength: view.getUint16(24, true),
   };
-  return { header, headerEndBuffer: it.next().value };
+  return { header, headerEndBuffer: buffer.subarray(26) };
 }
 
 function fromHeader(
@@ -112,12 +92,12 @@ export class LocalFileZipEntry {
     return this.#info.filename;
   }
 
-  get byteLength(): number {
+  get compressedSize(): number {
     return this.#info.header.compressedSize;
   }
 
   get remaning(): number {
-    return this.byteLength - this.#byteRead;
+    return this.compressedSize - this.#byteRead;
   }
 
   get consumed(): boolean {
@@ -130,9 +110,10 @@ export class LocalFileZipEntry {
     this.#buffer = buffer.buffer;
     this.#currentOffset = buffer.byteOffset;
     this.#currentLength = buffer.byteLength;
-    this.#byteRead = this.byteLength < (this.#currentLength - this.#currentOffset)
-      ? this.byteLength
-      : this.#currentLength - this.#currentOffset;
+    this.#byteRead =
+      this.compressedSize < (this.#currentLength - this.#currentOffset)
+        ? this.compressedSize
+        : this.#currentLength - this.#currentOffset;
   }
 
   readable(): ReadableStream<Uint8Array> {
@@ -144,8 +125,8 @@ export class LocalFileZipEntry {
 
   async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> {
     let buffer: Uint8Array | undefined;
-    if (this.byteLength < (this.#currentLength - this.#currentOffset)) {
-      yield new Uint8Array(this.#buffer, this.#currentOffset, this.byteLength);
+    if (this.compressedSize < (this.#currentLength - this.#currentOffset)) {
+      yield new Uint8Array(this.#buffer, this.#currentOffset, this.compressedSize);
       return;
     }
     yield new Uint8Array(this.#buffer, this.#currentOffset);
