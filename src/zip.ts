@@ -31,7 +31,7 @@ async function* exploreZip(
   let i = 0;
   let it: ReadableStreamBYOBReadResult<Uint8Array>;
   let buffer: Uint8Array;
-  while ((it = await reader.read(new Uint8Array(memoryBuffer))).value !== undefined) {
+  while (!(it = await reader.read(new Uint8Array(memoryBuffer))).done) {
     buffer = it.value;
     while ((i = buffer.indexOf(SIGNATURE[0])) !== -1) {
       buffer = buffer.subarray(i);
@@ -43,8 +43,10 @@ async function* exploreZip(
           reader,
         });
         yield entry;
-        if (entry.byteLength < endBuffer.byteLength) {
-          buffer = endBuffer.subarray(localFile.header.compressedSize); 
+        // If the file is already read into the current buffer
+        if (entry.compressedSize < endBuffer.byteLength) {
+          buffer = endBuffer.subarray(entry.compressedSize);
+          continue;
         }
         if (!entry.consumed) {
           for await (const it of entry) {
