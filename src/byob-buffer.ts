@@ -1,4 +1,5 @@
-import * as bytes from "https://deno.land/std@0.224.0/bytes/mod.ts";
+import { indexOfNeedle } from "std/bytes/index_of_needle.ts";
+import { EMPTY_BUFFER, EMPTY_UINT8_ARRAY } from "./constants.ts";
 
 export interface ByobBufferOptions {
   readable: ReadableStream<Uint8Array>;
@@ -25,13 +26,13 @@ export class ByobBuffer {
 
   async fill(): Promise<void> {
     const { done, value } = await this.#reader.read(new Uint8Array(this.#buffer));
-    this.#buffer = done ? new ArrayBuffer(0) : value.buffer;
+    this.#buffer = done ? EMPTY_BUFFER : value.buffer;
   }
 
   *findNeedle(needle: Uint8Array) {
     let view = new Uint8Array(this.#buffer);
     let i = 0;
-    while ((i = bytes.indexOfNeedle(view, needle)) !== -1) {
+    while ((i = indexOfNeedle(view, needle)) !== -1) {
       i += needle.length;
       yield i;
       view = new Uint8Array(this.#buffer, this.#offset);
@@ -39,6 +40,9 @@ export class ByobBuffer {
   }
 
   async read(length: number): Promise<Uint8Array> {
+    if (length === 0) {
+      return EMPTY_UINT8_ARRAY;
+    }
     let view: Uint8Array;
     if (this.#offset + length <= this.#buffer.byteLength) {
       view = new Uint8Array(this.#buffer, this.#offset, length);
@@ -56,7 +60,7 @@ export class ByobBuffer {
     const { done, value } = await this.#reader.read(new Uint8Array(this.#buffer));
     if (done) {
       this.#offset = 0;
-      this.#buffer = new ArrayBuffer(0);
+      this.#buffer = EMPTY_BUFFER;
       return new Uint8Array(this.#buffer);
     }
     this.#buffer = value.buffer;
