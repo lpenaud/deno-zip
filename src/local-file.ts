@@ -1,13 +1,13 @@
-import { subarrays } from "./utils.ts";
+import { parseDate } from "./utils.ts";
 import { Compression } from "./constants.ts";
+import { type ByobBuffer } from "./byob-buffer.ts";
 
 export interface LocalFileHeader {
   version: number;
   flags: number;
   compression: number;
-  modeTime: number;
-  modeDate: number;
-  crc32: Uint8Array;
+  mode: Date;
+  crc32: number;
   compressedSize: number;
   size: number;
   filenameLength: number;
@@ -28,53 +28,37 @@ export interface LocalFileZipEntryOptions {
 
 const HEADER_LENGTH = 30;
 
-function createHeader(buffer: Uint8Array) {
+function createHeader(buffer: Uint8Array): LocalFileHeader {
   const view = new DataView(buffer.buffer, buffer.byteOffset);
-  const header: LocalFileHeader = {
+  return {
     version: view.getUint16(0, true),
     flags: view.getUint16(2, true),
     compression: view.getUint16(4, true),
-    modeTime: view.getUint16(6, true),
-    modeDate: view.getUint16(8, true),
-    // Big endian
-    crc32: Uint8Array.of(
-      view.getUint8(13),
-      view.getUint8(12),
-      view.getUint8(11),
-      view.getUint8(10),
-    ),
+    mode: parseDate(view.getUint16(8, true), view.getUint16(6, true)),
+    crc32: view.getUint32(10, true),
     compressedSize: view.getUint32(14, true),
     size: view.getUint32(18, true),
     filenameLength: view.getUint16(22, true),
     extraFieldsLength: view.getUint16(24, true),
   };
-  return { header, headerEndBuffer: buffer.subarray(26) };
 }
 
-function fromHeader(
+async function fromHeader(
   header: LocalFileHeader,
-  buffer: Uint8Array,
+  buffer: ByobBuffer,
 ) {
   const decoder = new TextDecoder();
-  const it = subarrays(buffer, [
-    header.filenameLength,
-    header.extraFieldsLength,
-  ]);
   const localFile: LocalFile = {
     header,
-    filename: decoder.decode(it.next().value),
-    extraFields: it.next().value.slice(),
+    filename: decoder.decode(await buffer.read(header.filenameLength)),
+    extraFields: (await buffer.read(header.extraFieldsLength)).slice(),
   };
-  return { localFile, endBuffer: it.next().value };
+  return localFile;
 }
 
-export function createLocalFile(buffer: Uint8Array) {
-  const { header, headerEndBuffer } = createHeader(buffer);
-  const { localFile, endBuffer } = fromHeader(header, headerEndBuffer);
-  return {
-    localFile,
-    endBuffer,
-  };
+export async function createLocalFile(buffer: ByobBuffer) {
+  const header = createHeader(await buffer.read(0x1A));
+  return fromHeader(header, buffer);
 }
 
 export class LocalFileZipEntry {
@@ -151,7 +135,7 @@ export class LocalFileZipEntry {
         : this.#currentLength - this.#currentOffset;
   }
 
-  async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> {
+  async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array, void> {
     let buffer: Uint8Array | undefined;
     if (this.compressedSize < (this.#currentLength - this.#currentOffset)) {
       yield new Uint8Array(

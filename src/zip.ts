@@ -1,6 +1,6 @@
-import { indexOfNeedle } from "https://deno.land/std@0.216.0/bytes/index_of_needle.ts";
-import { createLocalFile, LocalFileZipEntry } from "./local-file.ts";
+import { createLocalFile } from "./local-file.ts";
 import { BUFFER_LENGTH, LOCAL_FILE_SIGNATURE } from "./constants.ts";
+import { ByobBuffer } from "./byob-buffer.ts";
 
 interface FromStreamOptions {
   bufferLength: number;
@@ -9,37 +9,24 @@ interface FromStreamOptions {
 export async function* fromStream(
   readable: ReadableStream<Uint8Array>,
   options?: Partial<FromStreamOptions>,
-): AsyncGenerator<LocalFileZipEntry> {
-  const reader = readable.getReader({ mode: "byob" });
-  let buffer = new ArrayBuffer(options?.bufferLength ?? BUFFER_LENGTH);
-  let it: ReadableStreamBYOBReadResult<Uint8Array>;
-  let view: Uint8Array;
-  let i: number;
-  while (!(it = await reader.read(new Uint8Array(buffer))).done) {
-    view = it.value;
-    while ((i = indexOfNeedle(view, LOCAL_FILE_SIGNATURE)) !== -1) {
-      view = view.subarray(i);
-      const { endBuffer, localFile } = createLocalFile(
-        view.subarray(LOCAL_FILE_SIGNATURE.byteLength),
-      );
-      const entry = new LocalFileZipEntry({
-        view: view,
-        info: localFile,
-        reader,
-      });
-      yield entry;
-      // If the file is already read into the current buffer
-      if (entry.compressedSize < endBuffer.byteLength) {
-        view = endBuffer.subarray(entry.compressedSize);
-        continue;
-      }
-      if (!entry.consumed) {
-        for await (const it of entry) {
-          // Consume the stream.
-          view = it;
-        }
+) {
+  const byobBuffer = new ByobBuffer({
+    readable,
+    byteLength: options?.bufferLength ?? BUFFER_LENGTH,
+  });
+  do {
+    await byobBuffer.fill();
+    for (const seek of byobBuffer.findNeedle(LOCAL_FILE_SIGNATURE)) {
+      await byobBuffer.read(seek);
+      const localFile = await createLocalFile(byobBuffer);
+      yield localFile;
+      for (
+        let remaning = localFile.header.compressedSize;
+        remaning > 0;
+        remaning -= (await byobBuffer.read(remaning)).byteLength
+      ) {
+        // Seek the stream to the end of the current local file
       }
     }
-    buffer = view.buffer;
-  }
+  } while (!byobBuffer.consumed);
 }
