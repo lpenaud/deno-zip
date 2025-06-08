@@ -68,7 +68,7 @@ export class LocalFileZipEntry {
 
   #byteRead: number;
 
-  #buffer: ArrayBuffer;
+  #buffer: ArrayBufferLike;
 
   #currentOffset: number;
 

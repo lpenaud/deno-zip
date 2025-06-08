@@ -1,4 +1,4 @@
-import { indexOfNeedle } from "std/bytes/index_of_needle.ts";
+import { indexOfNeedle } from "@std/bytes";
 import { EMPTY_BUFFER, EMPTY_UINT8_ARRAY } from "./constants.ts";
 
 export interface ByobBufferOptions {
@@ -10,7 +10,7 @@ export class ByobBuffer {
   
   #reader: ReadableStreamBYOBReader;
 
-  #buffer: ArrayBuffer;
+  #buffer: ArrayBufferLike;
 
   #offset: number;
 
@@ -25,8 +25,17 @@ export class ByobBuffer {
   }
 
   async fill(): Promise<void> {
-    const { done, value } = await this.#reader.read(new Uint8Array(this.#buffer));
-    this.#buffer = done ? EMPTY_BUFFER : value.buffer;
+    let byteOffset = 0;
+    for (;;) {
+      const { done, value } = await this.#reader.read(new Uint8Array(this.#buffer, byteOffset));
+      if (value !== undefined) {
+        this.#buffer = value.buffer;
+        byteOffset = value.byteOffset + value.byteLength;
+      }
+      if (done) {
+        break;
+      }
+    }
   }
 
   *findNeedle(needle: Uint8Array) {

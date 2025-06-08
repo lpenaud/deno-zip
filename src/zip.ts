@@ -1,6 +1,7 @@
 import { createLocalFile } from "./local-file.ts";
 import { BUFFER_LENGTH, LOCAL_FILE_SIGNATURE } from "./constants.ts";
 import { ByobBuffer } from "./byob-buffer.ts";
+import { indexOfNeedle } from "@std/bytes";
 
 interface FromStreamOptions {
   bufferLength: number;
