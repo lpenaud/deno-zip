@@ -1,6 +1,8 @@
 {
   "imports": {
     "@std/bytes": "jsr:@std/bytes@^1.0.6",
+    "@std/fs": "jsr:@std/fs@^1.0.18",
+    "@std/path": "jsr:@std/path@^1.1.0",
     "@std/streams": "jsr:@std/streams@^1.0.9"
   }
 }
