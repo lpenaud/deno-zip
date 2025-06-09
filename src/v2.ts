@@ -4,28 +4,60 @@ import {
   EMPTY_UINT8_ARRAY,
   LOCAL_FILE_SIGNATURE,
 } from "./constants.ts";
+import * as stdPath from "@std/path";
+import * as stdFs from "@std/fs";
+import * as stdStreams from "@std/streams";
 
-async function readAll(
-  reader: ReadableStreamBYOBReader,
-  buffer: ArrayBufferLike,
-) {
-  let byteOffset = 0;
-  for (;;) {
-    const { done, value } = await reader.read(
-      new Uint8Array(buffer, byteOffset),
-    );
-    if (value) {
-      buffer = value.buffer;
-      byteOffset = value.byteOffset + value.byteLength;
+class ByobTransformStream {
+  #buffer: ArrayBuffer;
+
+  #view: Uint8Array;
+
+  #reader: ReadableStreamDefaultReader<Uint8Array>;
+
+  #byteOffset: number;
+
+  constructor(readable: ReadableStream<Uint8Array>) {
+    this.#buffer = new ArrayBuffer(0);
+    this.#view = new Uint8Array(this.#buffer);
+    this.#reader = readable.getReader();
+    this.#byteOffset = 0;
+  }
+
+  async read(n: number): Promise<Uint8Array> {
+    while (this.#view.byteLength <= n) {
+      const { done, value } = await this.#reader.read();
+      if (value) {
+        this.#grow(value.byteLength);
+        this.#view.set(value);
+      }
+      if (done) {
+        break;
+      }
     }
-    // Trop ou suffisament de place
-    if (done) {
-      return new Uint8Array(buffer, 0, byteOffset);
+    const byteLength = Math.min(this.#view.byteLength, n);
+    const res = new Uint8Array(this.#buffer, this.#byteOffset, byteLength);
+    this.#byteOffset += byteLength;
+    this.#view = new Uint8Array(this.#buffer, this.#byteOffset);
+    // this.#view = this.#view.subarray(byteLength);
+    return res;
+  }
+
+  cancel(reason?: string): Promise<void> {
+    return this.#reader.cancel(reason);
+  }
+
+  #grow(n: number): void {
+    if (this.#view.byteLength > n) {
+      return;
     }
-    // Manque de place
-    if (byteOffset >= buffer.byteLength) {
-      return new Uint8Array(value.buffer);
-    }
+    this.#buffer = new ArrayBuffer(this.#view.byteLength + n);
+    const oldView = this.#view;
+    this.#view = new Uint8Array(this.#buffer);
+    // Copy remaning bytes
+    this.#view.set(oldView);
+    this.#view = this.#view.subarray(oldView.byteLength);
+    this.#byteOffset = 0;
   }
 }
 
@@ -59,21 +91,21 @@ function createHeader(buffer: Uint8Array): LocalFileHeader {
   };
 }
 
-interface DebugOptions {
+interface ZipEntry {
   headerBuffer: Uint8Array;
   header: LocalFileHeader;
   filename: string;
-  content: ReadableStream<Uint8Array>;
+  readable: ReadableStream<Uint8Array>;
 }
 
-export class ZipEntryReadableStream extends ReadableStream<Uint8Array> {
-  #reader: ReadableStreamBYOBReader;
+class ZipEntryReadableStream extends ReadableStream<Uint8Array> {
+  #reader: ByobTransformStream;
 
   #compressedSize: number;
 
   #count: number;
 
-  constructor(reader: ReadableStreamBYOBReader, compressedSize: number) {
+  constructor(reader: ByobTransformStream, compressedSize: number) {
     super({
       pull: async (controller) => {
         const chunk = await this.#read();
@@ -93,14 +125,11 @@ export class ZipEntryReadableStream extends ReadableStream<Uint8Array> {
     this.#count = 0;
   }
 
-  async #read(): Promise<Uint8Array<ArrayBufferLike>> {
+  async #read(): Promise<Uint8Array<ArrayBufferLike> | undefined> {
     if (this.consumed) {
-      return EMPTY_UINT8_ARRAY;
+      return undefined;
     }
-    const chunk = await readAll(
-      this.#reader,
-      new ArrayBuffer(Math.min(this.remaning, 8096)),
-    );
+    const chunk = await this.#reader.read(Math.min(this.remaning, 16_640));
     this.#count += chunk.byteLength;
     return chunk;
   }
@@ -115,7 +144,8 @@ export class ZipEntryReadableStream extends ReadableStream<Uint8Array> {
 }
 
 function getZipStream(
-  reader: ReadableStreamBYOBReader,
+  // reader: ReadableStreamBYOBReader,
+  reader: ByobTransformStream,
   { compressedSize, compression }: LocalFileHeader,
 ): ReadableStream<Uint8Array> {
   if (compressedSize === 0) {
@@ -135,46 +165,73 @@ function getZipStream(
 
 async function* unzip(
   readable: ReadableStream<Uint8Array>,
-): AsyncGenerator<DebugOptions> {
+): AsyncGenerator<ZipEntry> {
   const decoder = new TextDecoder();
-  const reader = readable.getReader({ mode: "byob" });
-  let headerBuffer = await readAll(reader, new ArrayBuffer(30));
+  const reader = new ByobTransformStream(readable);
+  let headerBuffer = await reader.read(30);
   if (!startsWith(headerBuffer, LOCAL_FILE_SIGNATURE)) {
-    reader.releaseLock();
-    await readable.cancel();
+    await reader.cancel();
     throw new Error("Invalid zip");
   }
   do {
     const header = createHeader(headerBuffer);
-    const filename = await readAll(
-      reader,
-      new ArrayBuffer(header.filenameLength),
-    );
-    if (header.extraFieldsLength > 0) {
-      await readAll(reader, new ArrayBuffer(header.extraFieldsLength));
-    }
-    const content = getZipStream(reader, header);
+    const filename = await reader.read(header.filenameLength);
+    // TODO: Parse extra fields
+    await reader.read(header.extraFieldsLength);
+    const readable = getZipStream(reader, header);
     yield {
       filename: decoder.decode(filename),
       header,
       headerBuffer,
-      content: content,
+      readable,
     };
-    headerBuffer = await readAll(reader, headerBuffer.buffer);
+    headerBuffer = await reader.read(headerBuffer.byteLength);
   } while (startsWith(headerBuffer, LOCAL_FILE_SIGNATURE));
-  reader.releaseLock();
-  await readable.cancel();
+  await reader.cancel();
 }
 
-async function main(): Promise<number> {
-  for await (const options of unzip(Deno.stdin.readable)) {
-    console.log(options.filename);
-    await options.content.cancel();
+interface MainArgs {
+  infile: Deno.FsFile;
+  outdir: string;
+}
+
+async function prepareArgs([inpath, outdir]: string[]): Promise<MainArgs> {
+  const [infile] = await Promise.all([
+    Deno.open(inpath),
+    stdFs.ensureDir(outdir),
+  ]);
+  return { infile, outdir: stdPath.resolve(outdir) };
+}
+
+async function main(args: string[]): Promise<number> {
+  if (args.length !== 2) {
+    console.error(
+      "Usage:",
+      import.meta.filename ?? import.meta.url,
+      "INFILE",
+      "OUTDIR",
+    );
+    return 1;
+  }
+  const { infile, outdir } = await prepareArgs(args);
+  for await (const options of unzip(infile.readable)) {
+    const outpath = stdPath.join(outdir, options.filename);
+    console.log(options.filename, "=>", outpath);
+    if (options.filename.endsWith("/")) {
+      await Deno.mkdir(outpath);
+      continue;
+    }
+    const outfile = await Deno.open(outpath, {
+      write: true,
+      createNew: true,
+    });
+    await options.readable.pipeTo(outfile.writable);
     // await options.content.pipeTo(Deno.stdout.writable, { preventClose: true });
   }
   return 0;
 }
 
 if (import.meta.main) {
-  Deno.exit(await main());
+  main(Deno.args.slice())
+    .then(Deno.exit);
 }
