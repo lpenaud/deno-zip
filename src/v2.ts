@@ -9,55 +9,56 @@ import * as stdFs from "@std/fs";
 import * as stdStreams from "@std/streams";
 
 class ByobTransformStream {
-  #buffer: ArrayBuffer;
 
-  #view: Uint8Array;
+  #views: Uint8Array[];
 
   #reader: ReadableStreamDefaultReader<Uint8Array>;
 
-  #byteOffset: number;
+  #byteLength: number;
 
   constructor(readable: ReadableStream<Uint8Array>) {
-    this.#buffer = new ArrayBuffer(0);
-    this.#view = new Uint8Array(this.#buffer);
     this.#reader = readable.getReader();
-    this.#byteOffset = 0;
+    this.#views = [];
+    this.#byteLength = 0;
   }
 
   async read(n: number): Promise<Uint8Array> {
-    while (this.#view.byteLength <= n) {
+    let r = new Uint8Array(n);
+    if (n === 0) {
+      return r;
+    }
+    while (this.#byteLength <= n) {
       const { done, value } = await this.#reader.read();
       if (value) {
-        this.#grow(value.byteLength);
-        this.#view.set(value);
+        this.#views.push(value.slice());
+        this.#byteLength += value.byteLength;
       }
       if (done) {
         break;
       }
     }
-    const byteLength = Math.min(this.#view.byteLength, n);
-    const res = new Uint8Array(this.#buffer, this.#byteOffset, byteLength);
-    this.#byteOffset += byteLength;
-    this.#view = new Uint8Array(this.#buffer, this.#byteOffset);
-    // this.#view = this.#view.subarray(byteLength);
-    return res;
+    let i: number;
+    for (i = 0; i < this.#views.length; i++) {
+      const v = this.#views[i];
+      const copied = v.subarray(0, Math.min(r.byteLength, v.byteLength));
+      r.set(copied);
+      r = r.subarray(copied.byteLength);
+      if (r.byteLength === 0) {
+        if (copied.byteLength !== v.byteLength) {
+          this.#views[i] = v.subarray(copied.byteLength);
+        } else {
+          i++;
+        }
+        break;
+      }
+    }
+    this.#views.splice(0, i);
+    this.#byteLength -= n;
+    return new Uint8Array(r.buffer);
   }
 
   cancel(reason?: string): Promise<void> {
     return this.#reader.cancel(reason);
-  }
-
-  #grow(n: number): void {
-    if (this.#view.byteLength > n) {
-      return;
-    }
-    this.#buffer = new ArrayBuffer(this.#view.byteLength + n);
-    const oldView = this.#view;
-    this.#view = new Uint8Array(this.#buffer);
-    // Copy remaning bytes
-    this.#view.set(oldView);
-    this.#view = this.#view.subarray(oldView.byteLength);
-    this.#byteOffset = 0;
   }
 }
 
