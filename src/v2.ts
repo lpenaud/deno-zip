@@ -279,9 +279,9 @@ async function main(args: string[]): Promise<number> {
     const outpath = stdPath.join(outdir, header.filename);
     console.log(header.filename, "=>", outpath);
     if (header.filename.endsWith("/")) {
-      await Deno.mkdir(outpath);
       continue;
     }
+    await stdFs.ensureDir(stdPath.dirname(outpath))
     const outfile = await Deno.open(outpath, {
       write: true,
       createNew: true,
